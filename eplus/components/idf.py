@@ -11,7 +11,6 @@ class IDFMixin:
         self._patched_idf_path: Optional[str] = None
         self._orig_idf_path: Optional[str] = None
     
-    # TODO:Add to ColabDOCs
     def clear_patched_idf(self):
         """Revert to the original IDF if we switched to a patched one."""
         if getattr(self, "_orig_idf_path", None):
