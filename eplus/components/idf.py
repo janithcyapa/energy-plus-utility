@@ -338,3 +338,52 @@ class IDFMixin:
         names = [m.strip() for m in matches]
         return names
 
+    def patch_idf_entry(self, object_type: str, object_name: str, old_value: str, new_value: str, inplace: bool = False) -> bool:
+        """
+        Finds a specific IDF object by type and name, and replaces a specific string inside its block.
+        This is a safe, general-purpose text updater that doesn't affect the rest of the file.
+        """
+        if not getattr(self, "idf", None) or not os.path.exists(self.idf):
+            raise FileNotFoundError("No IDF set. Call set_model() before updating.")
+            
+        with open(self.idf, 'r', errors='ignore') as f:
+            text = f.read()
+
+        # Regex to isolate the specific object block.
+        # Matches: ObjectType + comma + (optional comments) + ObjectName + (anything up to semicolon)
+        pattern = re.compile(
+            rf'(?i)(^[ \t]*{re.escape(object_type)}\s*,\s*(?:![^\n]*\n\s*)*{re.escape(object_name)}\s*[,;].*?;)', 
+            re.MULTILINE | re.DOTALL
+        )
+
+        def replacer(match):
+            block = match.group(1)
+            # Replace the old string with the new string ONLY within this specific block
+            new_block = block.replace(old_value, new_value)
+            return new_block
+
+        new_text, count = pattern.subn(replacer, text)
+
+        if count == 0:
+            print(f"Could not find '{object_type}' named '{object_name}' to patch.")
+            return False
+
+        # Determine where to save
+        if inplace:
+            out_file = self.idf
+        else:
+            base_name = os.path.basename(self.idf)
+            new_name = base_name.replace(".idf", "_patched.idf")
+            out_dir = getattr(self, 'out_dir', os.path.dirname(self.idf))
+            out_file = os.path.join(out_dir, new_name)
+            
+            # Update utility state so the simulation uses the patched file
+            self._orig_idf_path = getattr(self, '_orig_idf_path', self.idf) or self.idf
+            self.idf = out_file
+            self._patched_idf_path = out_file
+
+        with open(out_file, 'w', encoding='utf-8') as f:
+            f.write(new_text)
+
+        print(f"Patched '{object_name}' ({object_type}): Replaced '{old_value}' -> '{new_value}'")
+        return True
