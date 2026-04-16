@@ -4,6 +4,7 @@ from typing import Optional
 import os, io, csv as _csv, ast, shutil, pathlib, subprocess, re, tempfile, contextlib
 import pandas as pd
 from collections import Counter
+import re
 
 class IDFMixin:
     def __init__(self):
@@ -18,10 +19,31 @@ class IDFMixin:
         self._patched_idf_path = None
         self._orig_idf_path = None  # also clear to return to a clean slate
 
-    def _remove_object_blocks(self, idf_text: str, obj_name: str) -> str:
-        """Remove ALL blocks of a given object (case-insensitive; simple regex parser)."""
-        pattern = rf'(?is)^\s*{re.escape(obj_name)}\s*,.*?;[ \t]*\n'
-        return re.sub(pattern, '', idf_text, flags=re.MULTILINE)
+    def _remove_object_blocks(self, text: str, object_type: str) -> str:
+        """
+        Safely removes an entire IDF object block without affecting adjacent objects.
+        Uses a strictly bounded, non-greedy regex to stop exactly at the terminating semicolon.
+        """
+        # Regex Breakdown:
+        # (?i)       -> Case insensitive match
+        # ^\s* -> Start of line, allowing for leading spaces
+        # {obj}[,\s] -> The exact object name followed by a comma or whitespace
+        # .*?        -> Non-greedy match for all the fields inside the object
+        # ;          -> The strict terminator for the EnergyPlus object
+        # [^\n]*\n?  -> Cleanly swallows any trailing comments (!- ...) and the newline
+        
+        pattern = re.compile(
+            rf"(?i)^\s*{re.escape(object_type)}[,\s].*?;[^\n]*\n?", 
+            re.MULTILINE | re.DOTALL
+        )
+        
+        # Remove the targeted block
+        cleaned_text = pattern.sub("\n", text)
+        
+        # Clean up any excessive blank lines left behind to keep the IDF tidy
+        cleaned_text = re.sub(r'\n{3,}', '\n\n', cleaned_text)
+        
+        return cleaned_text
 
     def _append_block(self, idf_text: str, block: str) -> str:
         return idf_text.rstrip() + "\n\n" + block.strip() + "\n"

@@ -372,14 +372,16 @@ class SimulationMixin:
             {runperiod_name},         !- Name
             {sm},                     !- Begin Month
             {sd},                     !- Begin Day of Month
+            ,                         !- Begin Year (leave blank)
             {em},                     !- End Month
             {ed},                     !- End Day of Month
-            {sdow_line}                 !- Start Day of Week (blank = Use Weather File)
-            {'Yes' if use_weather_holidays else 'No'},  !- Use Weather File Holidays and Special Days
-            {'Yes' if use_weather_dst else 'No'},       !- Use Weather File Daylight Saving Period
+            ,                         !- End Year (THIS IS THE MISSING FIELD)
+            {sdow_line}                 !- Start Day of Week
+            {'Yes' if use_weather_holidays else 'No'},  !- Use Weather File Holidays
+            {'Yes' if use_weather_dst else 'No'},       !- Use Weather File Daylight Saving
             {'Yes' if weekend_holiday_rule else 'No'},  !- Apply Weekend Holiday Rule
-            {'Yes' if use_weather_rain else 'No'},      !- Use Weather File Rain Indicators
-            {'Yes' if use_weather_snow else 'No'};      !- Use Weather File Snow Indicators
+            {'Yes' if use_weather_rain else 'No'},      !- Use Weather File Rain
+            {'Yes' if use_weather_snow else 'No'};      !- Use Weather File Snow
             """
             text = self._append_block(text, rp_block)
         if (min_warmup_days is not None) or (max_warmup_days is not None):
