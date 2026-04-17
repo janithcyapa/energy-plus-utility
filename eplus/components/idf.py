@@ -409,3 +409,172 @@ class IDFMixin:
 
         print(f"Patched '{object_name}' ({object_type}): Replaced '{old_value}' -> '{new_value}'")
         return True
+
+    def _calculate_polygon_area(self, vertices) -> float:
+        """Calculates the area of a 3D planar polygon using vector cross products."""
+        try:
+            import numpy as np
+        except ImportError:
+            raise ImportError("numpy is required to calculate 3D polygon areas for thermal parameters.")
+
+        if len(vertices) < 3: 
+            return 0.0
+            
+        v = np.array([[pt.get('vertex_x_coordinate', 0), 
+                       pt.get('vertex_y_coordinate', 0), 
+                       pt.get('vertex_z_coordinate', 0)] for pt in vertices])
+        area = 0.0
+        v0 = v[0]
+        for i in range(1, len(v) - 1):
+            cross_prod = np.cross(v[i] - v0, v[i+1] - v0)
+            area += 0.5 * np.linalg.norm(cross_prod)
+        return area
+
+    def _get_construction_resistance(self, epjson: dict, construction_name: str) -> float:
+        """Estimates the unit thermal resistance (m2.K/W) of an E+ construction."""
+        constructions = epjson.get("Construction", {})
+        if construction_name not in constructions: 
+            return 1.0 
+            
+        # This handles standard 1-layer constructions. For robust multi-layer, 
+        # you would iterate through 'layer_2', 'layer_3', etc.
+        layers = [constructions[construction_name].get("outside_layer", "")]
+        materials = epjson.get("Material", {})
+        nomass_materials = epjson.get("Material:NoMass", {})
+        
+        total_ru = 0.15 # Inside/outside air film resistance baseline
+        
+        for layer in layers:
+            if layer in materials:
+                thickness = materials[layer].get("thickness", 0.1)
+                conductivity = materials[layer].get("conductivity", 1.0)
+                total_ru += (thickness / conductivity)
+            elif layer in nomass_materials:
+                total_ru += nomass_materials[layer].get("thermal_resistance", 1.0)
+                
+        return total_ru
+
+    def get_zone_thermal_parameters(self, eplus_dir: Optional[str] = None) -> dict:
+        """
+        Converts the current IDF to epJSON and extracts the explicit thermal 
+        parameters (R, C, M, V, and boundaries) required for state-space 
+        control laws prior to simulation execution.
+        """
+        import json
+        import subprocess
+        from pathlib import Path
+
+        if not getattr(self, "idf", None) or not os.path.exists(self.idf):
+            raise FileNotFoundError("No IDF set. Call set_model() before extracting parameters.")
+
+        # Determine EnergyPlus directory
+        if eplus_dir is None:
+            eplus_dir = os.environ.get("ENERGYPLUSDIR", "")
+            
+        idf_path = Path(self.idf)
+        epjson_path = idf_path.with_suffix(".epJSON")
+        
+        # 1. Convert IDF to epJSON
+        converter = os.path.join(eplus_dir, "ConvertInputFormat")
+        if not os.path.exists(converter):
+            # Fallback to system path if ENERGYPLUSDIR isn't set perfectly
+            converter = "ConvertInputFormat" 
+            
+        try:
+            subprocess.run([converter, str(idf_path)], check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            print(f"Error converting IDF to epJSON: {e.stderr.decode()}")
+            return {}
+
+        with open(epjson_path, "r", encoding="utf-8") as f:
+            epjson = json.load(f)
+
+        # --- Thermophysical Constants ---
+        RHO_AIR = 1.204 # kg/m3
+        CP_AIR = 1006.0 # J/(kg.K)
+        H_INT = 3.0     # W/(m2.K)
+
+        zones_data = {}
+        surface_to_zone = {}
+        
+        # 2. Initialize Zone Data
+        if "Zone" in epjson:
+            for z_name, z_info in epjson["Zone"].items():
+                c_height = z_info.get("ceiling_height", 3.0)
+                if c_height == "autocalculate": 
+                    c_height = 3.0
+                    
+                zones_data[z_name] = {
+                    "V_room": z_info.get("volume", 0.0),
+                    "_ceiling_height": c_height,
+                    "_floor_area": 0.0,
+                    "M_air": 0.0,
+                    "C_air": 0.0,
+                    "C_mass": 0.0,
+                    "R_int": 0.0,
+                    "boundaries": []
+                }
+
+        surfaces = epjson.get("BuildingSurface:Detailed", {})
+        for s_name, s_info in surfaces.items():
+            surface_to_zone[s_name.upper()] = s_info.get("zone_name")
+
+        # 3. Process Boundaries
+        for s_name, s_info in surfaces.items():
+            zone_name = s_info.get("zone_name")
+            if zone_name not in zones_data: 
+                continue
+            
+            boundary_cond = s_info.get("outside_boundary_condition", "").lower()
+            surf_type = s_info.get("surface_type", "").lower()
+            
+            # Calculate Area & Unit Resistance
+            area = self._calculate_polygon_area(s_info.get("vertices", []))
+            if surf_type == "floor": 
+                zones_data[zone_name]["_floor_area"] += area
+                
+            r_unit = self._get_construction_resistance(epjson, s_info.get("construction_name"))
+            r_absolute = r_unit / area if area > 0 else float('inf')
+            
+            # Determine target entity
+            target_entity = "Environment"
+            if boundary_cond in ["surface", "zone"]:
+                adj_surf = s_info.get("outside_boundary_condition_object", "").upper()
+                target_entity = surface_to_zone.get(adj_surf, "Unknown Zone")
+            elif boundary_cond == "ground":
+                target_entity = "Ground"
+
+            zones_data[zone_name]["boundaries"].append({
+                "surface_name": s_name,
+                "type": surf_type,
+                "boundary_condition": boundary_cond,
+                "target": target_entity,
+                "Area_m2": round(area, 2),
+                "Ru_unit_resistance": round(r_unit, 4),
+                "R_absolute_K_W": round(r_absolute, 4)
+            })
+
+        # 4. Finalize Capacitance and Resistance 
+        for z_name, data in zones_data.items():
+            # Estimate volume if autocalculated
+            if data["V_room"] == "autocalculate" or data["V_room"] == 0:
+                data["V_room"] = data["_floor_area"] * data["_ceiling_height"]
+                
+            data["M_air"] = round(data["V_room"] * RHO_AIR, 2)
+            data["C_air"] = round(data["M_air"] * CP_AIR, 2)
+            
+            # Mass node heuristic estimations
+            A_mass_est = data["_floor_area"] * 2.0 
+            
+            if A_mass_est > 0:
+                data["R_int"] = round(1.0 / (H_INT * A_mass_est), 4)
+                data["C_mass"] = round(data["_floor_area"] * 100000, 2) 
+            else:
+                data["R_int"] = float('inf')
+                data["C_mass"] = 0.0
+
+            # Remove temporary calculation variables
+            del data["_ceiling_height"]
+            del data["_floor_area"]
+
+        return zones_data
